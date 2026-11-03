@@ -77,7 +77,34 @@ In **search mode**: type your query, `Enter` to submit, `Esc` to cancel.
    `yt-dlp` internally to pick the best audio stream.
 4. mpv pushes property events (`time-pos`, `duration`, `pause`, `eof-reached`)
    back over the IPC socket; we render them.
-5. On `eof-reached`, we auto-advance to the next queued track.
+5. On `eof-reached`, we auto-advance to the next queued track. If 3 tracks
+   in a row fail to load, playback stops instead of burning through the
+   queue (see below).
+
+## YouTube rate limiting
+
+If YouTube decides your IP looks like a bot, yt-dlp fails with
+`HTTP Error 429: Too Many Requests` / `Sign in to confirm you're not a bot`.
+ytmtui runs without cookies by default, and when it detects that answer
+(from a search, a playlist fetch, or a track load) it stops playback and
+asks:
+
+- `y` / `Enter`: use the YouTube cookies of the browser shown (`←`/`→` to
+  pick: `firefox`, `chrome`, `safari`, ...) and retry what failed. This
+  passes `--cookies-from-browser` to every yt-dlp call (search, playlists,
+  captions, and mpv's stream resolution) **until you quit**. Cookies are
+  never on at startup.
+- `n` / `Esc`: stay without cookies. The status bar shows an estimated wait
+  (about an hour; YouTube doesn't say, so that is a rough rule of thumb).
+  You won't be asked again until that estimate has passed.
+
+The browser choice is saved in `config.json` and can also be changed in the
+parameters menu (`` ` ``). Firefox works out of the box. Chrome asks once
+for Keychain access, and Safari needs Full Disk Access for your terminal.
+
+Separately, after 3 failed loads in a row for any other reason the player
+stops and says so, because firing a request per track back to back is what
+gets an IP flagged.
 
 ## Layout
 

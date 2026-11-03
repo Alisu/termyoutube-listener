@@ -1,6 +1,36 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+use std::sync::Mutex;
+
+// Global rather than threaded through every call: search, playlist and
+// caption fetches all run on throwaway threads that would otherwise each
+// need the config cloned in.
+static COOKIES_BROWSER: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn set_cookies_browser(browser: Option<&str>) {
+    if let Ok(mut g) = COOKIES_BROWSER.lock() {
+        *g = browser.map(str::to_string);
+    }
+}
+
+/// YouTube's answer once it has flagged the IP as a bot: a sign-in wall on
+/// the watch page, or plain HTTP 429. Matched case-insensitively since
+/// yt-dlp and ffmpeg spell the 429 line differently.
+pub fn is_blocked_error(text: &str) -> bool {
+    let t = text.to_lowercase();
+    t.contains("confirm you") && t.contains("not a bot") || t.contains("429") && t.contains("too many requests")
+}
+
+/// `yt-dlp` with the user's cookie source applied. Use for every call that
+/// talks to a site; plain `Command::new("yt-dlp")` is only for `--version`.
+pub fn command() -> Command {
+    let mut cmd = Command::new("yt-dlp");
+    if let Some(b) = COOKIES_BROWSER.lock().ok().and_then(|g| g.clone()) {
+        cmd.args(["--cookies-from-browser", &b]);
+    }
+    cmd
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -121,7 +151,7 @@ pub fn platform_from_url(url: &str) -> Platform {
 
 pub fn fetch_playlist(url: &str) -> Result<PlaylistFetch> {
     let platform = platform_from_url(url);
-    let output = Command::new("yt-dlp")
+    let output = command()
         .args([
             "--flat-playlist",
             "--dump-json",
@@ -224,7 +254,7 @@ pub fn search(query: &str, limit: usize, platform: Platform) -> Result<Vec<Track
         "--skip-download",
         &q,
     ]);
-    let output = Command::new("yt-dlp")
+    let output = command()
         .args(&args)
         .output()
         .context("failed to run yt-dlp (is it installed and on PATH?)")?;
@@ -252,4 +282,22 @@ pub fn check_installed() -> Result<()> {
 pub fn version() -> Option<String> {
     let out = Command::new("yt-dlp").arg("--version").output().ok()?;
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_blocked_error;
+
+    #[test]
+    fn detects_youtube_blocks() {
+        assert!(is_blocked_error(
+            "ERROR: [youtube] abc: Sign in to confirm you\u{2019}re not a bot. Use --cookies-from-browser"
+        ));
+        assert!(is_blocked_error(
+            "WARNING: [youtube] abc: Unable to download webpage: HTTP Error 429: Too Many Requests"
+        ));
+        assert!(is_blocked_error("https: HTTP error 429 Too Many Requests"));
+        assert!(!is_blocked_error("ERROR: [youtube] abc: Video unavailable"));
+        assert!(!is_blocked_error("https: HTTP error 403 Forbidden"));
+    }
 }

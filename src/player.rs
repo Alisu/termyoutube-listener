@@ -23,6 +23,13 @@ pub struct PlayerState {
     pub duration: f64,
     pub idle: bool,
     pub eof_reached: bool,
+    /// Set when the last file ended because mpv could not load or play it
+    /// (end-file `reason: "error"`), carrying mpv's `file_error` text.
+    pub end_error: Option<String>,
+    /// yt-dlp (via mpv's ytdl hook) reported that YouTube is blocking this
+    /// connection while loading the current file. mpv itself only says
+    /// "loading failed", so this comes from its log stream.
+    pub youtube_blocked: bool,
     pub audio_codec: Option<String>,
     pub audio_bitrate: Option<f64>,
     pub samplerate: Option<u32>,
@@ -132,11 +139,29 @@ impl Player {
                         }
                         "end-file" => {
                             s.eof_reached = true;
+                            s.end_error = (val.get("reason").and_then(|r| r.as_str())
+                                == Some("error"))
+                            .then(|| {
+                                val.get("file_error")
+                                    .and_then(|e| e.as_str())
+                                    .unwrap_or("error")
+                                    .to_string()
+                            });
                             s.position = 0.0;
                             s.duration = 0.0;
                         }
+                        "log-message" => {
+                            if val
+                                .get("text")
+                                .and_then(|t| t.as_str())
+                                .is_some_and(crate::ytdlp::is_blocked_error)
+                            {
+                                s.youtube_blocked = true;
+                            }
+                        }
                         "start-file" => {
                             s.eof_reached = false;
+                            s.end_error = None;
                             s.idle = false;
                         }
                         _ => {}
@@ -161,6 +186,7 @@ impl Player {
         player.observe("audio-codec-name")?;
         player.observe("audio-bitrate")?;
         player.observe("audio-params")?;
+        player.command(vec![json!("request_log_messages"), json!("warn")])?;
         Ok(player)
     }
 
@@ -188,6 +214,8 @@ impl Player {
             s.duration = 0.0;
             s.position = 0.0;
             s.eof_reached = false;
+            s.end_error = None;
+            s.youtube_blocked = false;
             s.idle = false;
             s.paused = false;
         }
@@ -208,6 +236,15 @@ impl Player {
 
     pub fn set_volume(&self, v: u8) -> Result<()> {
         self.command(vec![json!("set_property"), json!("volume"), json!(v as i64)])
+    }
+
+    /// mpv's ytdl hook re-reads `ytdl-raw-options` on every load, so this
+    /// takes effect from the next track without restarting mpv.
+    pub fn set_cookies_browser(&self, browser: Option<&str>) -> Result<()> {
+        let raw = browser
+            .map(|b| format!("cookies-from-browser={}", b))
+            .unwrap_or_default();
+        self.command(vec![json!("set_property"), json!("ytdl-raw-options"), json!(raw)])
     }
 
     pub fn state(&self) -> PlayerState {

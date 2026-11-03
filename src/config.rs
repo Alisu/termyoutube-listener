@@ -41,6 +41,7 @@ pub struct Config {
     pub local_folder: Option<String>,
     pub local_folder_label: Option<String>,
     pub caption_lang: String,
+    pub cookies_browser: String,
 }
 
 impl Default for Config {
@@ -55,6 +56,7 @@ impl Default for Config {
             local_folder: None,
             local_folder_label: None,
             caption_lang: "en".into(),
+            cookies_browser: COOKIE_BROWSERS[0].into(),
         }
     }
 }
@@ -63,6 +65,15 @@ impl Default for Config {
 /// element 0 since the default falls back here.
 pub const CAPTION_LANGS: &[&str] = &[
     "en", "vi", "fr", "de", "es", "it", "pt", "ja", "ko", "zh", "ru",
+];
+
+/// Browsers yt-dlp can read cookies from (`--cookies-from-browser`), offered
+/// when YouTube blocks the connection. Logged-in cookies are what get YouTube
+/// to stop answering "Sign in to confirm you're not a bot" / HTTP 429 once it
+/// has flagged the IP. The config only stores which browser to offer; cookies
+/// are never on at startup.
+pub const COOKIE_BROWSERS: &[&str] = &[
+    "firefox", "chrome", "safari", "brave", "edge", "chromium", "opera", "vivaldi",
 ];
 
 pub fn path() -> PathBuf {

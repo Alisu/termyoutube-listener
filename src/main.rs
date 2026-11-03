@@ -222,6 +222,13 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 _ => {}
             }
         }
+        Mode::CookiePrompt => match code {
+            KeyCode::Char('y') | KeyCode::Enter => app.accept_cookies(),
+            KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => app.decline_cookies(),
+            KeyCode::Left | KeyCode::Char('h') => app.cookie_prompt_cycle(-1),
+            KeyCode::Right | KeyCode::Char('l') => app.cookie_prompt_cycle(1),
+            _ => {}
+        },
         Mode::Params => match code {
             KeyCode::Esc | KeyCode::Char('`') | KeyCode::Char('q') => app.close_params(),
             KeyCode::Left | KeyCode::Char('h') => app.params_change(-1),

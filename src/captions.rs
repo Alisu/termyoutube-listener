@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct Cue {
@@ -24,7 +23,7 @@ pub fn fetch(track_id: &str, lang: &str) -> Result<Vec<Cue>> {
     // once trips YouTube's HTTP 429 rate limiter. Anchor the language so
     // we ask for exactly one track.
     let lang_arg = format!("{}$", lang);
-    let output = Command::new("yt-dlp")
+    let output = crate::ytdlp::command()
         .args([
             "--skip-download",
             "--write-subs",

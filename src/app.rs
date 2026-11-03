@@ -17,6 +17,30 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+const MAX_CONSECUTIVE_LOAD_FAILURES: u8 = 3;
+/// YouTube never says how long a bot block lasts. Reports put the usual
+/// IP-level block at roughly an hour, so that is what we tell the user, and
+/// when we offer cookies again after a refusal.
+const BLOCK_WAIT_ESTIMATE: Duration = Duration::from_secs(60 * 60);
+
+/// What to redo once the user accepts cookies after a block.
+enum BlockRetry {
+    Track(usize),
+    Search(String),
+}
+
+fn block_wait_label(since: Instant) -> String {
+    let left = BLOCK_WAIT_ESTIMATE.saturating_sub(since.elapsed());
+    if left.is_zero() {
+        "These blocks usually lift within the hour, so it should clear soon".into()
+    } else {
+        format!(
+            "Est. wait ~{} min (rough guess, YouTube doesn't say)",
+            left.as_secs().div_ceil(60)
+        )
+    }
+}
+
 /// Small xorshift PRNG seeded from system time. Good enough for shuffle.
 fn rand_u64() -> u64 {
     static SEED: AtomicU64 = AtomicU64::new(0);
@@ -400,6 +424,7 @@ pub enum Mode {
     Searching,
     Help,
     Params,
+    CookiePrompt,
     Nerd,
     OpenFile,
     YtPlaylistInput,
@@ -494,6 +519,11 @@ pub struct App {
     caption_events_tx: Sender<CaptionEvent>,
     pub config: Config,
     pub params_row: usize,
+    consecutive_load_failures: u8,
+    pub cookies_active: bool,
+    cookies_declined: bool,
+    pub blocked_since: Option<Instant>,
+    block_retry: Option<BlockRetry>,
     sprites: Registry,
     pub playlist: Vec<Track>,
     pub focus: ListFocus,
@@ -562,6 +592,11 @@ impl App {
             caption_events_tx: cap_tx,
             config,
             params_row: 0,
+            consecutive_load_failures: 0,
+            cookies_active: false,
+            cookies_declined: false,
+            blocked_since: None,
+            block_retry: None,
             sprites,
             playlist: playlist.tracks,
             focus: ListFocus::Results,
@@ -897,12 +932,13 @@ impl App {
         match self.params_row {
             0 => self.params_cycle_sprite(delta),
             1 => self.params_cycle_caption_lang(delta),
+            2 => self.params_cycle_cookies_browser(delta),
             _ => {}
         }
     }
 
     pub fn params_move(&mut self, delta: i32) {
-        let row_count: i32 = 2;
+        let row_count: i32 = 3;
         let mut new = self.params_row as i32 + delta;
         if new < 0 {
             new = 0;
@@ -944,6 +980,100 @@ impl App {
         } else {
             self.status = format!("CC language: {}", self.config.caption_lang);
         }
+    }
+
+    fn params_cycle_cookies_browser(&mut self, delta: i32) {
+        self.cycle_cookies_browser(delta);
+    }
+
+    pub fn cookie_prompt_cycle(&mut self, delta: i32) {
+        self.cycle_cookies_browser(delta);
+    }
+
+    fn cycle_cookies_browser(&mut self, delta: i32) {
+        let browsers = config::COOKIE_BROWSERS;
+        let cur = browsers
+            .iter()
+            .position(|b| *b == self.config.cookies_browser.as_str())
+            .unwrap_or(0);
+        let next = if delta.signum() < 0 {
+            (cur + browsers.len() - 1) % browsers.len()
+        } else {
+            (cur + 1) % browsers.len()
+        };
+        self.config.cookies_browser = browsers[next].to_string();
+        if self.cookies_active {
+            self.apply_cookies(true);
+        }
+        if let Err(e) = config::save(&self.config) {
+            self.status = format!("Saved cookies browser (config write failed: {})", e);
+        } else {
+            self.status = format!("Cookies browser: {}", self.config.cookies_browser);
+        }
+    }
+
+    fn apply_cookies(&mut self, on: bool) {
+        let browser = on.then(|| self.config.cookies_browser.clone());
+        ytdlp::set_cookies_browser(browser.as_deref());
+        if let Err(e) = self.player.set_cookies_browser(browser.as_deref()) {
+            self.status = format!("mpv cookies setting failed: {}", e);
+        }
+    }
+
+    fn on_youtube_blocked(&mut self, retry: Option<BlockRetry>) {
+        let since = *self.blocked_since.get_or_insert_with(Instant::now);
+        if self.cookies_active {
+            self.status = format!(
+                "YouTube still blocking with {} cookies (logged into YouTube there?). {}",
+                self.config.cookies_browser,
+                block_wait_label(since)
+            );
+            return;
+        }
+        if self.cookies_declined && since.elapsed() < BLOCK_WAIT_ESTIMATE {
+            self.status = format!(
+                "YouTube is blocking this connection. {}",
+                block_wait_label(since)
+            );
+            return;
+        }
+        self.cookies_declined = false;
+        self.block_retry = retry;
+        self.mode = Mode::CookiePrompt;
+    }
+
+    pub fn accept_cookies(&mut self) {
+        self.mode = Mode::Browse;
+        self.cookies_active = true;
+        self.apply_cookies(true);
+        self.status = String::new();
+        match self.block_retry.take() {
+            Some(BlockRetry::Track(i)) => {
+                self.consecutive_load_failures = 0;
+                self.play_at(i);
+            }
+            Some(BlockRetry::Search(q)) => {
+                self.query = q;
+                self.submit_search();
+            }
+            None => {}
+        }
+        self.status = format!(
+            "Using {} cookies for YouTube until you quit. {}",
+            self.config.cookies_browser, self.status
+        );
+    }
+
+    pub fn decline_cookies(&mut self) {
+        self.mode = Mode::Browse;
+        self.cookies_declined = true;
+        self.block_retry = None;
+        let since = *self.blocked_since.get_or_insert_with(Instant::now);
+        self.status = format!("Staying without cookies. {}", block_wait_label(since));
+    }
+
+    pub fn block_wait_label(&self) -> Option<String> {
+        self.blocked_since.map(block_wait_label)
     }
 
     pub fn toggle_nerd(&mut self) {
@@ -1398,9 +1528,14 @@ impl App {
                     if self.current_search_query.as_deref() != Some(q.as_str()) {
                         continue;
                     }
+                    let mut blocked = false;
                     match res {
                         Ok(mut tracks) => {
                             self.results.append(&mut tracks);
+                        }
+                        Err(e) if ytdlp::is_blocked_error(&format!("{:#}", e)) => {
+                            blocked = true;
+                            self.on_youtube_blocked(Some(BlockRetry::Search(q.clone())));
                         }
                         Err(e) => {
                             self.status = format!("Search failed: {}", e);
@@ -1409,7 +1544,7 @@ impl App {
                     if self.pending_searches > 0 {
                         self.pending_searches -= 1;
                     }
-                    if self.pending_searches == 0 {
+                    if self.pending_searches == 0 && !blocked {
                         self.searching = false;
                         self.status = format!(
                             "Found {} results for \"{}\".",
@@ -1450,6 +1585,9 @@ impl App {
                     self.library_selected = self.library.position(&url).unwrap_or(0);
                     self.status =
                         format!("{} playlist loaded ({} tracks)", platform_short(platform), self.yt_playlist.len());
+                }
+                Err(e) if ytdlp::is_blocked_error(&format!("{:#}", e)) => {
+                    self.on_youtube_blocked(None);
                 }
                 Err(e) => {
                     self.status = format!("YT playlist failed: {}", e);
@@ -1544,7 +1682,36 @@ impl App {
         }
         // auto-advance on track end
         let st = self.player.state();
+        if self.blocked_since.is_some() && st.position > 0.0 && self.current_track().is_some_and(|t| {
+            matches!(t.platform, None | Some(ytdlp::Platform::YouTube))
+        }) {
+            self.blocked_since = None;
+            self.cookies_declined = false;
+        }
         if st.eof_reached && self.current.is_some() {
+            if st.end_error.is_some() && st.youtube_blocked {
+                // Every other YouTube track would hit the same wall, so
+                // stop here instead of advancing through the queue.
+                let retry = self.current.take().map(BlockRetry::Track);
+                self.on_youtube_blocked(retry);
+                return;
+            }
+            if let Some(err) = &st.end_error {
+                self.consecutive_load_failures += 1;
+                // A queue of unplayable tracks would otherwise fire one
+                // yt-dlp request per track back to back, which is exactly
+                // what gets an IP rate-limited by YouTube.
+                if self.consecutive_load_failures >= MAX_CONSECUTIVE_LOAD_FAILURES {
+                    self.current = None;
+                    self.status = format!(
+                        "Stopped: {} tracks in a row failed to load ({})",
+                        self.consecutive_load_failures, err
+                    );
+                    return;
+                }
+            } else {
+                self.consecutive_load_failures = 0;
+            }
             self.advance_after_eof();
         }
     }
@@ -1642,6 +1809,7 @@ impl App {
         };
         self.queue = source_tracks;
         self.queue_source = source;
+        self.consecutive_load_failures = 0;
 
         // Mirror the selected track into the live Unsaved list for memory
         // / visibility unless we are already playing from Unsaved itself.

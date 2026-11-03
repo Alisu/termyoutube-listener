@@ -34,6 +34,15 @@ src/stats.rs   sysinfo-based CPU/RAM sampler for the ytmtui + mpv PIDs
   paused, eof). **Do not spawn a new mpv per track.**
 - **Auto-advance** is driven by mpv's `eof-reached` property, polled in
   `App::drain_events` on every tick. Don't add a separate timer for it.
+  It stops after 3 consecutive load failures (mpv `end-file` with
+  `reason: "error"`, tracked as `PlayerState::end_error`) so a dead queue
+  doesn't hammer YouTube into rate-limiting the IP.
+- **yt-dlp calls go through `ytdlp::command()`,** which adds
+  `--cookies-from-browser` once the user accepts cookies; mpv gets the same
+  via `ytdl-raw-options`. Cookies are session-only and offered by
+  `Mode::CookiePrompt` when `ytdlp::is_blocked_error` matches a search or
+  playlist error, or a `ytdl_hook` log line during a load
+  (`PlayerState::youtube_blocked`, via mpv `request_log_messages`).
 - **Search is async via `std::sync::mpsc`.** `App::submit_search` spawns a
   thread; results land via `SearchEvent::Done` and are picked up in
   `drain_events`. UI never blocks on yt-dlp.

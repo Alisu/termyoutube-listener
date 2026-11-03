@@ -46,6 +46,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.mode == Mode::Params {
         draw_params_overlay(f, app, area);
     }
+    if app.mode == Mode::CookiePrompt {
+        draw_cookie_prompt(f, app, area);
+    }
     if app.mode == Mode::Nerd {
         draw_nerd_overlay(f, app, area);
     }
@@ -1210,9 +1213,61 @@ fn fmt_secs(s: f64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+fn draw_cookie_prompt(f: &mut Frame, app: &App, area: Rect) {
+    let w = 72.min(area.width.saturating_sub(4));
+    let h = 13.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(w)) / 2;
+    let y = (area.height.saturating_sub(h)) / 2;
+    let rect = Rect { x, y, width: w, height: h };
+
+    let key_style = Style::default().fg(Color::Yellow);
+    let dim = Style::default().fg(Color::DarkGray);
+    let wait = app.block_wait_label().unwrap_or_default();
+
+    let rows: Vec<Line> = vec![
+        Line::from(Span::styled(
+            " YouTube is blocking this connection ",
+            Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(" It answered \"Sign in to confirm you're not a bot\" / too many"),
+        Line::from(" requests. Using your browser's YouTube cookies gets past it,"),
+        Line::from(" for this session only."),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw(" Browser  "),
+            Span::styled("◀ ", dim),
+            Span::styled(
+                format!("{:^10}", app.config.cookies_browser),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ▶", dim),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(format!(" If you refuse: {}", wait), dim)),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  y/↵ ", key_style),
+            Span::styled("use cookies   ", dim),
+            Span::styled("n/Esc ", key_style),
+            Span::styled("no thanks   ", dim),
+            Span::styled("←/→ ", key_style),
+            Span::styled("browser", dim),
+        ]),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Cookies? ")
+        .style(Style::default().bg(Color::Black));
+    let p = Paragraph::new(rows).block(block).wrap(Wrap { trim: false });
+    f.render_widget(Clear, rect);
+    f.render_widget(p, rect);
+}
+
 fn draw_params_overlay(f: &mut Frame, app: &App, area: Rect) {
     let w = 56.min(area.width.saturating_sub(4));
-    let h = 12.min(area.height.saturating_sub(4));
+    let h = 14.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(w)) / 2;
     let y = (area.height.saturating_sub(h)) / 2;
     let rect = Rect { x, y, width: w, height: h };
@@ -1277,6 +1332,25 @@ fn draw_params_overlay(f: &mut Frame, app: &App, area: Rect) {
             Span::raw("  "),
             Span::styled(format!("({}/{})", lang_idx + 1, langs.len()), dim),
         ]),
+        Line::from(""),
+        Line::from(vec![
+            marker(2),
+            Span::raw("Cookies browser    "),
+            Span::styled("◀ ", dim),
+            Span::styled(
+                format!("{:^12}", app.config.cookies_browser),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ▶", dim),
+        ]),
+        Line::from(Span::styled(
+            if app.cookies_active {
+                "      in use until you quit"
+            } else {
+                "      offered only if YouTube blocks you"
+            },
+            dim,
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled("  ↑/↓ ", key_style),
